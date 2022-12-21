@@ -1,11 +1,13 @@
-use std::{collections::{HashMap, HashSet, hash_map::Entry}, convert::TryInto, fs::File, io::{BufWriter}, path::{Path, PathBuf}, time::{Duration, Instant, SystemTime}};
+use std::{collections::{HashMap, HashSet, hash_map::Entry, BTreeMap}, convert::TryInto, fs::File, io::{BufWriter}, path::{Path, PathBuf}, time::{Duration, Instant, SystemTime}};
 
-use etw_reader::{GUID, open_trace, parser::{Parser, TryParse}, print_property, schema::SchemaLocator, write_property};
+use etw_reader::{GUID, open_trace, parser::{Parser, TryParse, Address}, print_property, schema::SchemaLocator, write_property};
 use serde_json::{Value, json, to_writer};
 
 use gecko_profile::{MarkerDynamicField, MarkerFieldFormat, MarkerLocation, MarkerSchema, MarkerSchemaField, MarkerTiming, ProfilerMarker, TextMarker, ThreadBuilder, debugid};
 use debugid::DebugId;
 use uuid::Uuid;
+
+use std::collections::Bound::{Included, Unbounded};
 
 fn is_kernel_address(ip: u64, pointer_size: u32) -> bool {
     if pointer_size == 4 {
@@ -93,6 +95,8 @@ fn main() {
     let mut global_thread = ThreadBuilder::new(1, 1, profile_start_instant, false, false);
     let mut gpu_thread = ThreadBuilder::new(1, 1, profile_start_instant, true, false);
     let mut has_vsync = false;
+    let mut jscript_symbols: HashMap<u32, BTreeMap<u64, (u64, String)>> = HashMap::new();
+    let mut jscript_sources: HashMap<u64, String> = HashMap::new();
 
     open_trace(Path::new(&trace_file), |e| {
         event_count += 1;
@@ -248,7 +252,22 @@ fn main() {
                     stack.reverse();
 
                     let mut add_sample = |thread: &mut ThreadState, timestamp, stack: Vec<u64>| {
-                        let frames = stack.iter().map(|addr| gecko_profile::Frame::Address(*addr));
+                        let mut builder = &mut thread.builder;
+                        let frames = stack.iter().map(|addr| {
+                            //if process_id == 6736 { dbg!(process_id, jscript_symbols.values()); };
+
+                            if let Some(syms) = jscript_symbols.get(&process_id) {
+                                if let Some(sym) = syms.range((Unbounded, Included(addr))).last() {
+                                    //if process_id == 6736 { eprintln!("{:x} {:x}", addr, sym.0); }
+                                    if *addr < *sym.0 + sym.1.0 {
+                                        //eprintln!("found match for {} {:?}", addr, sym);
+                                        return gecko_profile::Frame::Label(builder.intern_string(&sym.1.1));
+                                    }
+                                }
+                            }
+                            gecko_profile::Frame::Address(*addr)
+
+                        }).collect::<Vec<_>>();
                         if merge_threads {
                             let stack_frames = frames;
                             let mut frames = Vec::new();
@@ -260,7 +279,7 @@ fn main() {
                             let delta = thread.total_running_time - thread.previous_sample_cpu_time;
                             thread.previous_sample_cpu_time = thread.total_running_time;
                             let delta = Duration::from_nanos(to_nanos(delta as u64));
-                            thread.builder.add_sample(timestamp, frames, delta);
+                            thread.builder.add_sample(timestamp, frames.into_iter(), delta);
                         }
                     };
 
@@ -414,6 +433,49 @@ fn main() {
                     // these events can give us the unblocking stack
                     let mut parser = Parser::create(&s);
                     let _thread_id: u32 = parser.parse("TThreadId");
+                }
+                "V8.js/MethodLoad/" /*|
+                "Microsoft-JScript/MethodRuntime/MethodDCStart" |
+                "Microsoft-JScript/MethodRuntime/MethodLoad"*/ => {
+                    // these events can give us the unblocking stack
+                    let mut parser = Parser::create(&s);
+                    let method_name: String = parser.parse("MethodName");
+                    let method_start_address: Address = parser.parse("MethodStartAddress");
+                    let method_size: u64 = parser.parse("MethodSize");
+                    let source_id: u64 = parser.parse("SourceID");
+                    //if s.process_id() == 6736 { dbg!(s.process_id(), &method_name, method_start_address, method_size); }
+                    let syms =  jscript_symbols.entry(s.process_id()).or_insert(BTreeMap::new());
+                    let start_address = method_start_address.as_u64();
+                    let name_and_file = format!("{} {}", method_name, jscript_sources.get(&source_id).map(|x| x.as_ref()).unwrap_or("?"));
+
+                    let mut overlaps = Vec::new();
+                    for sym in syms.range_mut((Included(start_address), Included(start_address + method_size))) {
+                        if name_and_file != sym.1.1 || start_address != *sym.0 || method_size != sym.1.0 {
+                            println!("overlap {} {} {} -  {:?}", method_name, start_address, method_size, sym);
+                            overlaps.push(*sym.0);
+                        } else {
+                            println!("overlap same {} {} {} -  {:?}", method_name, start_address, method_size, sym);
+                        }
+                    }
+                    for sym in overlaps {
+                        syms.remove(&sym);
+                    }
+
+                    syms.insert(start_address, (method_size, name_and_file));
+                    //dbg!(s.process_id(), jscript_symbols.keys());
+
+                }
+                "V8.js/SourceLoad/" /*|
+                "Microsoft-JScript/MethodRuntime/MethodDCStart" |
+                "Microsoft-JScript/MethodRuntime/MethodLoad"*/ => {
+                    // these events can give us the unblocking stack
+                    let mut parser = Parser::create(&s);
+                    let source_id: u64 = parser.parse("SourceID");
+                    let url: String = parser.parse("Url");
+                    //if s.process_id() == 6736 { dbg!(s.process_id(), &method_name, method_start_address, method_size); }
+                    jscript_sources.insert(source_id, url);
+                    //dbg!(s.process_id(), jscript_symbols.keys());
+
                 }
                 _ => {
                     if s.name().starts_with("Google.Chrome/") {
