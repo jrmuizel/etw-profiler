@@ -74,7 +74,7 @@ pub fn open_trace<F: FnMut(&EventRecord)>(path: &Path, mut callback: F)  {
     let path = HSTRING::from(path.as_os_str());
     #[cfg(not(windows))]
     let path: HSTRING = panic!();
-    log_file.0.LogFileName = unsafe { PWSTR(path.as_wide().as_ptr() as *mut _) };
+    log_file.0.LogFileName = PWSTR(path.as_wide().as_ptr() as *mut _);
     log_file.0.Anonymous1.ProcessTraceMode = Etw::PROCESS_TRACE_MODE_EVENT_RECORD | Etw::PROCESS_TRACE_MODE_RAW_TIMESTAMP;
     let mut cb: &mut dyn FnMut(&EventRecord) = &mut callback;
     log_file.0.Context = unsafe { std::mem::transmute(&mut cb) };
@@ -329,6 +329,12 @@ pub fn write_property(output: &mut dyn std::fmt::Write, parser: &mut Parser, pro
                     },
                     TdhInType::InTypePointer | TdhInType::InTypeSizeT => TryParse::<u64>::try_parse(parser, &property.name).map(|x| x.to_string()),
                     TdhInType::InTypeGuid => TryParse::<GUID>::try_parse(parser, &property.name).map(|x| format!("{:?}", x)),
+                    TdhInType::InTypeInt32 => {
+                        TryParse::<i32>::try_parse(parser, &property.name).map(|x| x.to_string())
+                    }
+                    TdhInType::InTypeFloat => {
+                        TryParse::<f32>::try_parse(parser, &property.name).map(|x| x.to_string())
+                    }
                     _ => Ok(format!("Unknown {:?}", desc.in_type))
                 }
             }
