@@ -405,8 +405,8 @@ fn main() {
 
                     let timestamp: u64 = parser.parse("EventTimeStamp");
                     if !process_targets.contains(&process_id) {
-                        // eprintln!("not watching");
-                        return;
+                        //dbg!(&process_targets, process_id);
+                         //return;
                     }
                     
                     let thread = match threads.entry(thread_id) {
@@ -416,6 +416,9 @@ fn main() {
                             let handle = match global_thread {
                                 Some(global_thread) => global_thread,
                                 None => {
+                                    if !processes.contains_key(&process_id) {
+                                        return;
+                                    }
                                     let process = processes[&process_id].process_handle;
                                     profile.add_thread(process, thread_id, thread_start_instant, false)
                                 }
@@ -427,7 +430,7 @@ fn main() {
                             tb
                         }
                     };
-                    // eprint!("{} {} {}", thread_id, e.EventHeader.TimeStamp, timestamp);
+                     //eprint!("{} {} {}", thread_id, e.EventHeader.TimeStamp, timestamp);
 
                     let mut stack_mode = StackMode::User;
 
@@ -440,10 +443,14 @@ fn main() {
                         }
                         stack.push(StackFrame::InstructionPointer(first_frame_address, stack_mode));
                         for frame_address in address_iter {
+                            //println!("{:x} {:?} {}", frame_address, stack_mode, is_kernel_address(frame_address, 8));
+                            let stack_mode = if is_kernel_address(frame_address, 8) {
+                                StackMode::Kernel
+                            } else {
+                                StackMode::User
+                            };
                             stack.push(StackFrame::ReturnAddress(frame_address, stack_mode));
-                            if is_kernel_address(frame_address, 8) {
-                                stack_mode = StackMode::Kernel;
-                            }
+
                         }
                     }
 
@@ -493,7 +500,7 @@ fn main() {
                     }
 
                     // Only add callstacks if this stack is associated with a SampleProf event
-                    if let Some(last) = thread.last_sample_timestamp {
+                    /*if let Some(last) = thread.last_sample_timestamp {
                         if timestamp as i64 != last {
                             // eprintln!("doesn't match last");
                             return
@@ -501,11 +508,17 @@ fn main() {
                     } else {
                         // eprintln!("not last");
                         return
-                    }
-                    //eprintln!(" sample");
+                    }*/
+                    //eprintln!(" sample {:?}", stack_mode);
 
                     if stack_mode == StackMode::Kernel {
                         //eprintln!("kernel ");
+                        if !processes.contains_key(&process_id) { return }
+                        let process = processes.get_mut(&process_id).unwrap();
+                        let delta = context_switch_handler.consume_cpu_delta(&mut thread.context_switch_data);
+                        let cpu_delta = CpuDelta::from_nanos(delta as u64 * timestamp_converter.raw_to_ns_factor);
+                        add_sample(thread, process, timestamp, cpu_delta, 1, std::mem::take(&mut stack));
+                        return;
                         if let Some(last_stack) = thread.unfinished_kernel_stacks.last_mut() {
                             if last_stack.timestamp == timestamp {
                                 last_stack.stack.extend_from_slice(&stack[..]);
@@ -517,6 +530,7 @@ fn main() {
                         thread.unfinished_kernel_stacks.push(UnfinishedKernelStack { timestamp, stack, cpu_delta });
                         return;
                     }
+                    return;
 
                     let delta = context_switch_handler.consume_cpu_delta(&mut thread.context_switch_data);
                     let cpu_delta = CpuDelta::from_nanos(delta as u64 * timestamp_converter.raw_to_ns_factor);
