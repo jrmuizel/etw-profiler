@@ -967,7 +967,7 @@ fn main() {
                     profile.add_marker(thread.handle, category, s.name().split_once("/").unwrap().1, TextMarker(text), timing);
                 }
                 _ => {
-                    if let Some(marker_name) = s.name().strip_prefix("Mozilla.FirefoxTraceLogger/").and_then(|s| s.strip_suffix("/")) {
+                    if let Some(marker_name) = s.name().strip_prefix("Mozilla.FirefoxTraceLogger/").and_then(|s| s.strip_suffix("/Info")) {
                         let thread_id = e.EventHeader.ThreadId;
                         let thread = match threads.entry(thread_id) {
                             Entry::Occupied(e) => e.into_mut(), 
@@ -1031,7 +1031,7 @@ fn main() {
                         } else {
                             profile.add_marker(thread.handle, CategoryHandle::OTHER, marker_name, TextMarker(text.clone()), timing);
                         }
-                    } else if let Some(marker_name) = s.name().strip_prefix("Google.Chrome/").and_then(|s| s.strip_suffix("/")) {
+                    } else if let Some(marker_name) = s.name().strip_prefix("Google.Chrome/").and_then(|s| s.strip_suffix("/Info")) {
                         // a bitfield of keywords
                         bitflags! {
                             #[derive(PartialEq, Eq)]
