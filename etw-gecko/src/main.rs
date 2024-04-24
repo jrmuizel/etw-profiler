@@ -89,11 +89,17 @@ struct PendingStack {
     on_cpu_sample_cpu_delta: Option<CpuDelta>,
 }
 
+struct PendingMarker {
+    text: String,
+    start: Timestamp,
+}
+
 struct ThreadState {
     // When merging threads `handle` is the global thread handle and we use `merge_name` to store the name
     handle: ThreadHandle,
     merge_name: Option<String>,
     pending_stacks: VecDeque<PendingStack>,
+    pending_markers: HashMap<String, PendingMarker>,
     context_switch_data: ThreadContextSwitchData,
     thread_id: u32
 }
@@ -103,6 +109,7 @@ impl ThreadState {
         ThreadState {
             handle,
             pending_stacks: VecDeque::new(),
+            pending_markers: HashMap::new(),
             context_switch_data: ThreadContextSwitchData::default(),
             merge_name: None,
             thread_id: tid
@@ -895,6 +902,69 @@ fn main() {
                     jscript_sources.insert(source_id, url);
                     //dbg!(s.process_id(), jscript_symbols.keys());
 
+                }
+                "Microsoft-Windows-Direct3D11/ID3D11VideoContext_SubmitDecoderBuffers/win:Start" => {
+                    let mut parser = Parser::create(&s);
+
+                    let timestamp = e.EventHeader.TimeStamp as u64;
+                    let timestamp = timestamp_converter.convert_raw(timestamp);
+                    let thread_id = e.EventHeader.ThreadId;
+                    let thread = match threads.entry(thread_id) {
+                        Entry::Occupied(e) => e.into_mut(), 
+                        Entry::Vacant(_) => {
+                            dropped_sample_count += 1;
+                            // We don't know what process this will before so just drop it for now
+                            return;
+                        }
+                    };
+                    let mut text = String::new();
+                    for i in 0..s.property_count() {
+                        let property = s.property(i);
+                        //dbg!(&property);
+                        write_property(&mut text, &mut parser, &property, false);
+                        text += ", "
+                    }
+                    thread.pending_markers.insert(s.name().to_owned(), PendingMarker { text, start: timestamp });
+                }
+                "Microsoft-Windows-Direct3D11/ID3D11VideoContext_SubmitDecoderBuffers/win:Stop" => {
+                    let mut parser = Parser::create(&s);
+
+                    let timestamp = e.EventHeader.TimeStamp as u64;
+                    let timestamp = timestamp_converter.convert_raw(timestamp);
+                    let thread_id = e.EventHeader.ThreadId;
+                    let thread = match threads.entry(thread_id) {
+                        Entry::Occupied(e) => e.into_mut(), 
+                        Entry::Vacant(_) => {
+                            dropped_sample_count += 1;
+                            // We don't know what process this will before so just drop it for now
+                            return;
+                        }
+                    };
+                    
+                    let mut text = String::new();
+                    let timing = if let Some(pending) = thread.pending_markers.remove("Microsoft-Windows-Direct3D11/ID3D11VideoContext_SubmitDecoderBuffers/win:Start") {
+                        text = pending.text;
+                        MarkerTiming::Interval(pending.start, timestamp)
+                    } else {
+                        MarkerTiming::IntervalEnd(timestamp)
+                    };
+
+                    for i in 0..s.property_count() {
+                        let property = s.property(i);
+                        //dbg!(&property);
+                        write_property(&mut text, &mut parser, &property, false);
+                        text += ", "
+                    }
+
+                    let category = match categories.entry(s.provider_name()) {
+                        Entry::Occupied(e) => *e.get(),
+                        Entry::Vacant(e) => {
+                            let category = profile.add_category(e.key(), CategoryColor::Transparent);
+                            *e.insert(category)
+                        }
+                    };
+
+                    profile.add_marker(thread.handle, category, s.name().split_once("/").unwrap().1, TextMarker(text), timing);
                 }
                 _ => {
                     if let Some(marker_name) = s.name().strip_prefix("Mozilla.FirefoxTraceLogger/").and_then(|s| s.strip_suffix("/")) {
